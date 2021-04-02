@@ -4,8 +4,9 @@ mod server;
 extern crate num_cpus;
 
 fn main() {
-    let mut socket = client::TLSSocketClient::init();
+    let mut socket = client::TCPSocketClient::init();
+    let mut pool = pool::Pool::new(num_cpus::get());
     loop {
-        client::grab_multiple(num_cpus::get(), &mut socket);
+        client::grab_multiple(&mut pool, &mut socket);
     }
 }
