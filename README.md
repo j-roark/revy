@@ -1,4 +1,5 @@
-# Revy - Windows Display & Keyboard Data Exfiltration
+# <center> Revy - Windows Display & Keyboard Data Exfiltration </center>
+<center>![gif](https://i.pinimg.com/originals/8c/1a/83/8c1a8375906729158f39a37ec4906389.gif)</center>
 
 This program is designed to be a demonstration of how vulnerable windows is to data exfiltration to a remote server.  
 It reads the target's screen, compresses the raw data 100:1 for data extraction, and simultaneously captures the key inputs during this time as well. These two things are sent to a remote server over SSL to prevent IDS detection. To my knowledge this __isn't detected__ by windows defender as malware, it __doesn't require__ admin escalation, and isn't susceptible to __PPI__ or other IDS exfil prevention techniques.
