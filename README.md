@@ -6,7 +6,7 @@ It reads the target's screen, compresses the raw data 100:1 for data extraction,
 ## TODO
 - At the moment this program works but development environments are difficult to set up with SSL.
 - Setup custom build files for better cross-platform support
-- Set up an environment variable for differentiation between client and server so main.rs doesn't need modification
+- Split server and client packages
 
 ## Installation
 
@@ -18,9 +18,7 @@ __To compile for Windows__
 cargo build
 ```
 __To compile for a remote server__
-- Generate key files for your domain
-- Remove line 10 from "Cargo.toml" if compiling for Linux
-- Point lines 43 and 44 in server.rs to your key and certificate files.
+- SSL guide coming soon
 
 ## Usage
 Start the remote server and start the client process on the target machine.
